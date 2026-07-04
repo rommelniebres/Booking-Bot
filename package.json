@@ -1,0 +1,17 @@
+{
+  "name": "booking-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "setup":  "node setup.js",
+    "book":      "node book.js",
+    "attend":    "node book.js --attend",
+    "now":       "node book.js --now",
+    "test-book": "node book.js --test"
+  },
+  "dependencies": {
+    "dotenv":     "^16.0.0",
+    "luxon":      "^3.0.0",
+    "playwright": "^1.44.0"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.har
+playwright-report/
+test-results/
+.browser-data/
+.claude/
