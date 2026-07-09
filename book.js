@@ -20,7 +20,6 @@ const BOOKER_NAME     = process.env.BOOKER_NAME              ?? '';
 const BOOKER_PHONE    = process.env.BOOKER_PHONE             ?? '';
 const BOOKER_EMAIL    = process.env.BOOKER_EMAIL             ?? '';
 const WALLET_PIN       = process.env.WALLET_PIN               ?? '';
-const TEST_URL         = process.env.TEST_URL                 ?? '';
 const FIRE_IN_SECONDS  = parseInt(process.env.FIRE_IN_SECONDS ?? '10');
 const TEST_WALLET_PIN  = process.env.TEST_WALLET_PIN          ?? '000000';
 
@@ -34,6 +33,9 @@ const FACILITY         = process.env.BOOKING_FACILITY   ?? 'facility';
 const PRIMARY_RESOURCE = process.env.PRIMARY_RESOURCE   ?? 'Resource 1';
 const SALE_RESOURCE_1  = process.env.SALE_RESOURCE_1    ?? 'Resource 2';
 const SALE_RESOURCE_2  = process.env.SALE_RESOURCE_2    ?? 'Resource 3';
+// Court options shown in the startup picker (comma-separated in .env).
+const COURT_CHOICES    = (process.env.COURT_CHOICES ?? '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 const SALE_PRICE       = process.env.SALE_PRICE         ?? '100.00';
 const PAYMENT_CATEGORY = process.env.PAYMENT_CATEGORY   ?? 'E-Wallets';
 const PAYMENT_LABEL    = process.env.PAYMENT_LABEL      ?? 'Wallet';
@@ -52,10 +54,24 @@ const BLOCK_MENU = [
   ['7pm-8pm', '8pm-9pm', '9pm-10pm'],  // 7–10 pm
 ];
 
+// Ordered hour boundaries for the custom picker (4pm through 2am).
+const HOURS = ['4pm','5pm','6pm','7pm','8pm','9pm','10pm','11pm','12am','1am','2am'];
+
+// Build the list of hourly slot labels between a start and end hour, e.g.
+// buildSlots('4pm','7pm') → ['4pm-5pm','5pm-6pm','6pm-7pm'].
+function buildSlots(startHour, endHour) {
+  const s = HOURS.indexOf(startHour);
+  const e = HOURS.indexOf(endHour);
+  if (s === -1 || e === -1 || e <= s) return [];
+  const slots = [];
+  for (let i = s; i < e; i++) slots.push(`${HOURS[i]}-${HOURS[i + 1]}`);
+  return slots;
+}
+
 // ─── url builder ─────────────────────────────────────────────────────────────
 
-function buildBookingUrl(openMidnight) {
-  const target   = openMidnight.plus({ days: DAYS_AHEAD });
+function buildBookingUrl(openMidnight, targetOverride = null) {
+  const target   = targetOverride ?? openMidnight.plus({ days: DAYS_AHEAD });
   const bookdate = target.toFormat('yyyy-MM-dd');
   const bookday2 = target.toFormat('cccc');
   return `${BASE_URL}?court=${FACILITY}&bookdate=${bookdate}&bookday2=${bookday2}`;
@@ -88,12 +104,17 @@ function consecutiveBlock(startTime, n) {
   return block.length === n ? block : null;
 }
 
-async function isSlotFree(page, court, timeLabel) {
+// 'free'   = bookable, 'taken' = shows a "(…)" marker, 'absent' = not on this tab
+async function cellState(page, court, timeLabel) {
   const el = cell(page, court, timeLabel);
-  if (!el) return false;
-  if (!(await el.isVisible().catch(() => false))) return false;
+  if (!el) return 'absent';
+  if (!(await el.isVisible().catch(() => false))) return 'absent';
   const text = await el.innerText().catch(() => '');
-  return !text.includes('(');
+  return text.includes('(') ? 'taken' : 'free';
+}
+
+async function isSlotFree(page, court, timeLabel) {
+  return (await cellState(page, court, timeLabel)) === 'free';
 }
 
 async function isBlockFree(page, court, startTime, n = 3) {
@@ -119,12 +140,10 @@ async function isSaleDay(page) {
   return false;
 }
 
-// ─── runtime block prompt ─────────────────────────────────────────────────────
+// ─── runtime prompt ───────────────────────────────────────────────────────────
 
-async function askBlock() {
-  const rl  = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ask = q => new Promise(r => rl.question(q, r));
-
+// Pick one of the preset 3-hour blocks for the primary resource.
+async function pickBlock(ask) {
   console.log('\n┌─────────────────────────────────────────────────┐');
   console.log('│  Preferred block (used on non-promo days)       │');
   console.log('├─────────────────────────────────────────────────┤');
@@ -133,17 +152,113 @@ async function askBlock() {
   });
   console.log('│  [Enter]  Default: 4pm–7pm                      │');
   console.log('└─────────────────────────────────────────────────┘');
-
-  const ans = (await ask('\n  Choice: ')).trim();
-  rl.close();
-
+  const ans = (await ask('  Choice: ')).trim();
   const idx = parseInt(ans) - 1;
   return (idx >= 0 && idx < BLOCK_MENU.length) ? BLOCK_MENU[idx] : BLOCK_MENU[0];
 }
 
+// Pick a court from COURT_CHOICES by number, with a default. Typing a name
+// that isn't in the list is accepted as a custom value.
+async function pickCourt(ask, label, def) {
+  console.log(`\n  ${label}`);
+  if (COURT_CHOICES.length) {
+    COURT_CHOICES.forEach((c, i) => console.log(`    ${i + 1}) ${c}`));
+  }
+  const ans = (await ask(`    Choice [Enter = ${def}]: `)).trim();
+  if (!ans) return def;
+  const idx = parseInt(ans) - 1;
+  if (idx >= 0 && idx < COURT_CHOICES.length) return COURT_CHOICES[idx];
+  return ans; // custom court name typed directly
+}
+
+// Pick an hour from HOURS by number, with a default.
+async function pickHour(ask, label, def) {
+  const list = HOURS.map((h, i) => `${i + 1}) ${h}`).join('   ');
+  console.log(`\n  ${label}`);
+  console.log(`    ${list}`);
+  const ans = (await ask(`    Choice [Enter = ${def}]: `)).trim();
+  const idx = parseInt(ans) - 1;
+  return (idx >= 0 && idx < HOURS.length) ? HOURS[idx] : def;
+}
+
+// Pick the booking date. Accepts an ISO date (YYYY-MM-DD) or a number of days
+// ahead; Enter keeps the default (DAYS_AHEAD out). Returns a Manila-midnight
+// DateTime to use as the target, or null to keep the default.
+async function pickDate(ask) {
+  const preview = DateTime.now().setZone('Asia/Manila')
+    .plus({ days: DAYS_AHEAD }).toFormat('yyyy-MM-dd (cccc)');
+  console.log('\n  Booking date');
+  console.log('    Enter a date (YYYY-MM-DD) or a number of days ahead.');
+  const ans = (await ask(`    Choice [Enter = default ${preview}]: `)).trim();
+  if (!ans) return null;
+
+  const midnight = DateTime.now().setZone('Asia/Manila')
+    .set({ hour: 0, minute: 0, second: 0, millisecond: 0 });
+
+  if (/^\d+$/.test(ans)) return midnight.plus({ days: parseInt(ans) });
+
+  const dt = DateTime.fromFormat(ans, 'yyyy-MM-dd', { zone: 'Asia/Manila' });
+  if (!dt.isValid) {
+    console.log(`  ⚠ Invalid date "${ans}" — using default.`);
+    return null;
+  }
+  return dt.set({ hour: 0, minute: 0, second: 0, millisecond: 0 });
+}
+
+// Returns either:
+//   { mode: 'default', preferredBlock }            — smart defaults + promo switch
+//   { mode: 'manual',  selections: [{court, slots}], date } — book exactly these
+async function askPlan() {
+  const rl  = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = q => new Promise(r => rl.question(q, r));
+  try {
+    console.log('\n════════════════════════════════════════════════════');
+    console.log(' Booking plan');
+    console.log('   [Enter] Use defaults  (primary court; promo → sale courts)');
+    console.log('   c       Customize courts & hours');
+    console.log('════════════════════════════════════════════════════');
+    const mode = (await ask('  Choice: ')).trim().toLowerCase();
+
+    if (mode !== 'c') {
+      const court = await pickCourt(ask, 'Court', PRIMARY_RESOURCE);
+      const preferredBlock = await pickBlock(ask);
+      return { mode: 'default', court, preferredBlock };
+    }
+
+    const date = await pickDate(ask);
+
+    const countRaw = (await ask('\n  How many courts? [1]: ')).trim();
+    const count = Math.max(1, parseInt(countRaw) || 1);
+
+    const selections = [];
+    for (let i = 0; i < count; i++) {
+      const court = await pickCourt(ask, `Court #${i + 1}`, PRIMARY_RESOURCE);
+      const start = await pickHour(ask, `Court #${i + 1} START hour`, '4pm');
+      // default end = one block after start (or last hour)
+      const defEndIdx = Math.min(HOURS.indexOf(start) + 1, HOURS.length - 1);
+      const end = await pickHour(ask, `Court #${i + 1} END hour`, HOURS[defEndIdx]);
+      const slots = buildSlots(start, end);
+      if (!slots.length) {
+        console.log(`  ⚠ ${court}: end must be after start — skipped.`);
+        continue;
+      }
+      console.log(`  ✓ ${court}: ${slots[0]} → ${slots[slots.length - 1]}`);
+      selections.push({ court, slots });
+    }
+
+    if (!selections.length) {
+      console.log('  No valid selections — falling back to defaults.');
+      return { mode: 'default', preferredBlock: BLOCK_MENU[0], date };
+    }
+    return { mode: 'manual', selections, date };
+  } finally {
+    rl.close();
+  }
+}
+
 // ─── slot selection ───────────────────────────────────────────────────────────
 
-async function selectAndPark(page, preferredBlock) {
+async function selectAndPark(page, plan) {
   const allTabs  = await page.getByRole('tab').all();
   const tabNames = (await Promise.all(allTabs.map(t => t.textContent().catch(() => ''))))
     .map(t => t.trim())
@@ -155,6 +270,38 @@ async function selectAndPark(page, preferredBlock) {
     await page.getByRole('tab', { name: tabName }).click();
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.waitForTimeout(200);
+
+    // ── manual mode: book exactly the picked courts/hours (no promo switch) ──
+    if (plan.mode === 'manual') {
+      let anyPresent = false, allFree = true;
+      for (const sel of plan.selections) {
+        for (const slot of sel.slots) {
+          const st = await cellState(page, sel.court, slot);
+          if (st !== 'absent') anyPresent = true;
+          if (st !== 'free')   allFree = false;
+        }
+      }
+
+      if (!anyPresent) continue;              // wrong tab — try the next one
+      if (!allFree) {
+        console.log(`  [${tabName}] Picked slots not all free yet — retrying…`);
+        return false;                          // present but taken — reload & retry
+      }
+
+      for (const sel of plan.selections) {
+        console.log(`  [${tabName}] ${sel.court}: ${sel.slots[0]} → ${sel.slots[sel.slots.length - 1]}`);
+        for (const slot of sel.slots) {
+          await cell(page, sel.court, slot).click();
+          await page.waitForTimeout(120);
+        }
+      }
+      await page.getByRole('button', { name: /Proceed/i }).click();
+      console.log('  Parked at Confirm — waiting for fire time.');
+      return true;
+    }
+
+    const preferredBlock = plan.preferredBlock;
+    const primaryCourt   = plan.court ?? PRIMARY_RESOURCE;
 
     // ── promo day: book sale resource 1 (4–7pm) + sale resource 2 (4–6pm) ────
     if (await isSaleDay(page)) {
@@ -183,17 +330,17 @@ async function selectAndPark(page, preferredBlock) {
       return true;
     }
 
-    // ── standard: find a free block on the primary resource ──────────────────
+    // ── standard: find a free block on the chosen court ──────────────────────
     // Try the user's preferred start first, then fall back to any 3-hour window.
     const preferredStart = preferredBlock[0];
     let found = null;
 
-    if (await isBlockFree(page, PRIMARY_RESOURCE, preferredStart, 3)) {
+    if (await isBlockFree(page, primaryCourt, preferredStart, 3)) {
       found = preferredStart;
     } else {
       for (const start of ALL_SLOTS) {
         if (start === preferredStart) continue; // already tried
-        if (await isBlockFree(page, PRIMARY_RESOURCE, start, 3)) {
+        if (await isBlockFree(page, primaryCourt, start, 3)) {
           found = start;
           break;
         }
@@ -201,14 +348,14 @@ async function selectAndPark(page, preferredBlock) {
     }
 
     if (!found) {
-      console.log(`  [${tabName}] ${PRIMARY_RESOURCE} — no free 3-hour block here, trying next tab…`);
+      console.log(`  [${tabName}] ${primaryCourt} — no free 3-hour block here, trying next tab…`);
       continue;
     }
 
     const block = consecutiveBlock(found, 3);
-    console.log(`  [${tabName}] ${PRIMARY_RESOURCE}: ${block[0]} → ${block[block.length - 1]}`);
+    console.log(`  [${tabName}] ${primaryCourt}: ${block[0]} → ${block[block.length - 1]}`);
     for (const s of block) {
-      await cell(page, PRIMARY_RESOURCE, s).click();
+      await cell(page, primaryCourt, s).click();
       await page.waitForTimeout(120);
     }
     await page.getByRole('button', { name: /Proceed/i }).click();
@@ -402,10 +549,11 @@ function nextOpenMoment() {
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 async function main(mode) {
-  let preferredBlock = BLOCK_MENU[0]; // default 4–7pm
+  // Auto-select modes ask for a booking plan; attend picks manually in-browser.
+  let plan = { mode: 'default', preferredBlock: BLOCK_MENU[0] };
 
-  if (mode === 'book') {
-    preferredBlock = await askBlock();
+  if (['book', 'now', 'test'].includes(mode)) {
+    plan = await askPlan();
   }
 
   // Persistent context keeps the wallet login (cookies/session) across runs.
@@ -417,10 +565,10 @@ async function main(mode) {
     if (mode === 'now') {
       const anchor = DateTime.now().setZone('Asia/Manila')
         .set({ hour: 0, minute: 0, second: 0, millisecond: 0 });
-      const url = buildBookingUrl(anchor);
+      const url = buildBookingUrl(anchor, plan.date);
       console.log('[now] URL:', url);
       await page.goto(url, { waitUntil: 'networkidle' });
-      const parked = await selectAndPark(page, preferredBlock);
+      const parked = await selectAndPark(page, plan);
       if (!parked) { console.log('Nothing free.'); return; }
       const confirmBtn = page.getByRole('button', { name: 'Confirm' });
       await confirmBtn.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
@@ -430,17 +578,15 @@ async function main(mode) {
       return;
     }
 
-    // ── test: specific URL + simulated midnight countdown ────────────────────
+    // ── test: same URL/date as the official run, but a short countdown ───────
     if (mode === 'test') {
-      if (!TEST_URL) {
-        console.error('TEST_URL is not set in .env');
-        return;
-      }
-      console.log('[test] URL     :', TEST_URL);
+      const openMidnight = nextOpenMoment();
+      const url = buildBookingUrl(openMidnight, plan.date);
+      console.log('[test] URL     :', url);
       console.log('[test] Fire in :', FIRE_IN_SECONDS, 'seconds');
       const fireAt = DateTime.now().setZone('Asia/Manila').plus({ seconds: FIRE_IN_SECONDS });
-      await page.goto(TEST_URL, { waitUntil: 'networkidle' });
-      const parked = await selectAndPark(page, preferredBlock);
+      await page.goto(url, { waitUntil: 'networkidle' });
+      const parked = await selectAndPark(page, plan);
       if (!parked) { console.log('Nothing free on test URL.'); return; }
       await fireConfirm(page, fireAt);
       await fillForm(page);
@@ -449,7 +595,7 @@ async function main(mode) {
     }
 
     const openMidnight = nextOpenMoment();
-    const url = buildBookingUrl(openMidnight);
+    const url = buildBookingUrl(openMidnight, plan.date);
     console.log('Target URL  :', url);
     console.log('Opens at    :', openMidnight.toISO());
 
@@ -482,7 +628,7 @@ async function main(mode) {
     let parked = false;
     while (!parked) {
       await page.goto(url, { waitUntil: 'networkidle' });
-      parked = await selectAndPark(page, preferredBlock);
+      parked = await selectAndPark(page, plan);
       if (!parked) {
         console.log(`  Retrying in ${RETRY_MS}ms…`);
         await page.waitForTimeout(RETRY_MS);
