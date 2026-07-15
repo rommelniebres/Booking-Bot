@@ -1,13 +1,19 @@
 {
   "name": "booking-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "setup":  "node setup.js",
-    "book":      "node book.js",
-    "attend":    "node book.js --attend",
-    "now":       "node book.js --now",
-    "test-book": "node book.js --test"
+
+    "pick":      "node v2/pick.js",
+    "book":      "node v2/run.js",
+    "test-book": "node v2/run.js --test",
+    "now":       "node v2/run.js --now",
+
+    "book-v1":      "node book.js",
+    "attend-v1":    "node book.js --attend",
+    "now-v1":       "node book.js --now",
+    "test-book-v1": "node book.js --test"
   },
   "dependencies": {
     "dotenv":     "^16.0.0",
