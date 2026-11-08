@@ -6,11 +6,13 @@ pre-selects your preferred slots shortly before the open time, waits at the
 confirmation step, fires exactly at the open moment, then auto-fills the form
 and completes checkout.
 
-> **v2 (current):** You pick your court, date, and time slots **visually on the
-> real booking page** — no more terminal prompts guessing at courts/hours. Your
-> pick is saved and replayed automatically at the open moment. The old
-> prompt-driven flow is still available as the `-v1` commands. See
-> [Changelog](#changelog).
+> **v2 (current):** You build a **ranked wish-list of court blocks** visually on
+> the real booking page — click a court's consecutive hours (e.g. 4–7pm), add
+> backup courts, and set how many courts to book. At the open moment the bot
+> grabs the best courts that are actually free. It works for **future dates past
+> the bookable window** by picking against the latest open date of the same
+> weekday. The old prompt-driven flow is still available as the `-v1` commands.
+> See [Changelog](#changelog).
 
 Everything site-specific (URL, resource names, prices, payment labels,
 credentials) lives in a local `.env` file, so the code itself is generic and
@@ -20,14 +22,18 @@ reusable for any similar booking flow.
 
 - **Two-phase timing:** pre-selects before the open time, then fires the confirm
   click at the exact second the window opens.
-- **Promo handling:** if a discounted early slot is detected, books an
-  alternate pair of resources in a single transaction.
-- **Configurable block picker:** choose your preferred 3-hour block at startup,
-  with automatic fallback to any free window.
+- **Ranked court blocks:** rank courts by preference; each court books its
+  consecutive hours **all-or-nothing** (or a per-court minimum, so a backup court
+  can take a shorter run). At the open, the bot reads the whole grid in one pass
+  and books the best-ranked courts that are free.
+- **Multi-court:** book more than one court in a single run (set a default when
+  picking, or override per run with `--courts N`).
+- **Future-date picking:** the target date can be past the bookable window; you
+  pick against the latest open date of the same weekday (same shift pattern).
 - **Persistent login:** saves the browser session so you stay logged in for
   checkout across runs.
-- **Dry-run mode:** test the whole flow against any URL with a simulated
-  countdown and a dummy PIN — no real payment.
+- **Two test modes:** `test-book` (mechanics, dummy PIN) and `test-open` (a real
+  pre-midnight dry run that races the open but never books).
 
 ## Requirements
 
@@ -46,33 +52,56 @@ cp .env.example .env      # then edit .env with your values
 Edit `.env` (or run `npm run setup`). See `.env.example` for every option.
 Key values:
 
-| Variable            | Meaning                                            |
-|---------------------|----------------------------------------------------|
-| `BOOKING_BASE_URL`  | The scheduling page to automate                    |
-| `PRIMARY_RESOURCE`  | Resource name to book on a normal day              |
-| `SALE_RESOURCE_*`   | Resources to book when a promo is detected         |
-| `WALLET_PIN`        | Your 6-digit checkout PIN (local only)             |
-| `BOOKER_*`          | Name / phone / email for the booking form          |
-| `HEADLESS`          | `false` shows the browser window (recommended)     |
+| Variable            | Meaning                                                      |
+|---------------------|--------------------------------------------------------------|
+| `BOOKING_BASE_URL`  | The scheduling page to automate                              |
+| `BOOKING_FACILITY`  | Facility/court group in the page URL                         |
+| `OPEN_TIME`         | Local time the booking window opens (e.g. `00:00`)           |
+| `DAYS_AHEAD`        | Booking lead — how many days out the target date is          |
+| `OPEN_WINDOW_DAYS`  | How many dates the site serves at once (default `14`)        |
+| `PRE_OPEN_MS`       | How long before the open time to start pre-selecting         |
+| `WALLET_PIN`        | Your 6-digit checkout PIN (local only)                       |
+| `BOOKER_*`          | Name / phone / email for the booking form                    |
+| `HEADLESS`          | `false` shows the browser window (recommended)               |
 
 ## Usage (v2 — default)
 
 The v2 flow is two steps: **pick** once, then **run**.
 
 ```bash
-npm run pick        # opens the booking page; click your court/date/time cells,
-                    #   then press the green "✓ Save selection" button
-npm run book        # official run: waits until ~3 min before the open time,
-                    #   replays your saved pick, fires Confirm at the open moment
-npm run test-book   # replay your pick with a ~10s countdown + dummy PIN (dry run)
-npm run now         # replay your pick immediately (live test)
+npm run pick               # build your ranked court blocks on the real page,
+                           #   then press the green "✓ Save selection" button
+npm run book               # official run: waits until ~3 min before the open time,
+                           #   replays your pick, fires Confirm at the open moment
+npm run book -- --courts 2 # same, but book up to 2 courts this run (overrides the
+                           #   saved default)
+npm run test-book          # mechanics dry run: ~10s countdown + dummy PIN, replayed
+                           #   against the latest same-weekday open date
+npm run test-open          # REAL pre-midnight dry run: races the actual open on the
+                           #   real target date, parks at Confirm, never books
+npm run now                # replay your pick immediately (live test)
 ```
 
-**How pick works:** the browser opens on the booking page. Navigate to the date
-you want and click the court/time cells (click again to unselect — each is
-highlighted). A corner panel shows your running selection, the date, and the
-shift. Press **✓ Save selection** and the bot records the exact date, shift,
-court(s), and slot(s) to `v2/selection.json`. Every later run just replays that.
+**How pick works:** the browser opens on the booking page, on the latest already
+open date that shares your target's weekday (the real target is usually past the
+bookable window). In the corner panel:
+
+- **Target date** — the date you'll actually book (defaults to the one that opens
+  at the next midnight). Changing it re-navigates to the matching reference date.
+- **Click a court's hours in priority order** — free *or* already-taken cells
+  both work (a slot taken today may be free on the target date). Clicks group into
+  one **block per court**, ranked by the order you first click each court.
+- **Per-court minimum** — each court shows "take only if ≥ N consecutive hrs
+  free". Default = all its hours (strict / all-or-nothing); lower it so a backup
+  court will take a shorter run (e.g. 2h).
+- **Courts to book** — how many courts to grab in a run (saved as your default).
+
+Press **✓ Save selection** and the bot records your target date, shift, ranked
+court blocks, per-court minimums, and courts-to-book to `v2/selection.json`.
+
+**At the open**, the run reads the whole grid in one pass and books, in priority
+order, up to your courts-to-book count — each court taking its longest consecutive
+free run that meets its minimum, skipping any court that can't.
 
 **First run:** run `npm run pick` once and log in when prompted. The session is
 saved to `.browser-data/` so you stay logged in on later runs. Run only **one**
@@ -101,7 +130,22 @@ npm run test-book-v1   # dry run vs TEST_URL with a fake countdown + dummy PIN
 
 ## Changelog
 
-### v2.0.0 — visual pick flow (current)
+### v2.1.0 — ranked court blocks & multi-court (current)
+
+- **Ranked court blocks.** Pick replaced the single fixed selection with a
+  priority-ordered list of courts, each a block of consecutive hours booked
+  all-or-nothing (or down to a per-court minimum).
+- **Multi-court.** Book more than one court per run — set a default while picking
+  or override with `npm run book -- --courts N`.
+- **Future-date picking.** The target date can be past the bookable window; you
+  pick against the latest open date of the same weekday. Click **taken** cells too
+  (time is read from the grid's column header).
+- **`test-open`.** A real pre-midnight dry run that races the actual open on the
+  real target date and parks at Confirm without booking.
+- **Faster retries.** Removed a 30s stall when the date is still closed, so the
+  run catches the open within one loop tick.
+
+### v2.0.0 — visual pick flow
 
 - **Pick on the real page.** New `npm run pick` lets you select your court, date,
   and time slots directly on the booking site, then save them with an in-browser

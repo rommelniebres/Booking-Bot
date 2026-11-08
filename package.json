@@ -1,6 +1,6 @@
 {
   "name": "booking-bot",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "scripts": {
     "setup":  "node setup.js",
@@ -8,6 +8,7 @@
     "pick":      "node v2/pick.js",
     "book":      "node v2/run.js",
     "test-book": "node v2/run.js --test",
+    "test-open": "node v2/run.js --test-open",
     "now":       "node v2/run.js --now",
 
     "book-v1":      "node book.js",
